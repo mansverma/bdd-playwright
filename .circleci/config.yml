@@ -173,16 +173,16 @@ workflows:
           requires:
             - install-dependencies
       
-      # Run tests after setup is complete
+      # Run tests after setup is complete  
       - test-bdd:
           requires:
             - install-browsers
-            - lint
+            # Note: lint dependency removed since install-browsers already depends on install-dependencies
       
       - test-playwright:
           requires:
             - install-browsers
-            - lint
+            # Note: lint dependency removed since install-browsers already depends on install-dependencies
   
   # Nightly workflow to catch dependency issues
   nightly-test:
