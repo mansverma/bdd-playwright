@@ -1,31 +1,205 @@
 version: 2.1
 
+# Define orbs
 orbs:
   node: circleci/node@5.2
 
+# Define executors for better resource management
+executors:
+  node-playwright:
+    docker:
+      - image: cimg/node:20.10-browsers
+    working_directory: ~/bdd-playwright
+    environment:
+      # Playwright environment variables
+      PLAYWRIGHT_BROWSERS_PATH: /home/circleci/pw-browsers
+      # Force headless mode in CI
+      CI: true
+
+# Define jobs
 jobs:
-  test-bdd:
-    executor:
-      name: node/default
-      tag: '20.10'   # ✅ Node.js 20 (supported by Playwright + Cucumber)
+  # Install and cache dependencies
+  install-dependencies:
+    executor: node-playwright
     steps:
       - checkout
+      - restore_cache:
+          keys:
+            - node-deps-v2-{{ checksum "package-lock.json" }}
+            - node-deps-v2-
+      - run:
+          name: Install Node.js dependencies
+          command: npm ci
+      - save_cache:
+          key: node-deps-v2-{{ checksum "package-lock.json" }}
+          paths:
+            - ~/.npm
+            - node_modules
+      - persist_to_workspace:
+          root: ~/bdd-playwright
+          paths:
+            - node_modules
+            - package*.json
 
-      # Install Node dependencies
-      - node/install-packages:
-          pkg-manager: npm
-
-      # Install Playwright browsers + Linux deps
+  # Install Playwright browsers with caching
+  install-browsers:
+    executor: node-playwright
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/bdd-playwright
+      - restore_cache:
+          keys:
+            - playwright-browsers-v2-{{ checksum "package-lock.json" }}
+            - playwright-browsers-v2-
       - run:
           name: Install Playwright Browsers
-          command: npx playwright install --with-deps
+          command: |
+            # Install browsers with system dependencies
+            npx playwright install --with-deps
+      - save_cache:
+          key: playwright-browsers-v2-{{ checksum "package-lock.json" }}
+          paths:
+            - /home/circleci/pw-browsers
+            - ~/.cache/ms-playwright
+      - persist_to_workspace:
+          root: ~/bdd-playwright
+          paths:
+            - node_modules
+            - package*.json
 
-      # Run BDD tests
+  # Lint code (optional)
+  lint:
+    executor: node-playwright
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/bdd-playwright
+      - run:
+          name: Run linting
+          command: |
+            # Check if linting is configured
+            if [ -f .eslintrc* ] || grep -q "eslint" package.json; then
+              npm run lint
+            else
+              echo "No linting configuration found, skipping..."
+            fi
+
+  # Run BDD tests with enhanced reporting
+  test-bdd:
+    executor: node-playwright
+    parallelism: 2  # Run tests in parallel for faster execution
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/bdd-playwright
+      - restore_cache:
+          keys:
+            - playwright-browsers-v2-{{ checksum "package-lock.json" }}
+            - playwright-browsers-v2-
+      - run:
+          name: Create test results directory
+          command: mkdir -p test-results
       - run:
           name: Run BDD Tests
-          command: npm run test:bdd
+          command: |
+            # Run Cucumber.js BDD tests with CI profile
+            npm run test:bdd:ci
+          environment:
+            # Ensure tests run in headless mode
+            HEADLESS: true
+            # Set up test reporting
+            CUCUMBER_PUBLISH_QUIET: true
+      - store_test_results:
+          path: test-results
+      - store_artifacts:
+          path: test-results
+          destination: test-results
+      - store_artifacts:
+          path: playwright-report
+          destination: playwright-report
+      - store_artifacts:
+          path: screenshots
+          destination: screenshots
+      - store_artifacts:
+          path: videos
+          destination: videos
 
+  # Run any direct Playwright tests (if present)
+  test-playwright:
+    executor: node-playwright
+    steps:
+      - checkout
+      - attach_workspace:
+          at: ~/bdd-playwright
+      - restore_cache:
+          keys:
+            - playwright-browsers-v2-{{ checksum "package-lock.json" }}
+            - playwright-browsers-v2-
+      - run:
+          name: Run Playwright Tests
+          command: |
+            # Only run if there are direct Playwright test files
+            if find . -name "*.spec.js" -o -name "*.test.js" | head -1 | grep -q .; then
+              npx playwright test
+            else
+              echo "No direct Playwright test files found, skipping..."
+            fi
+      - store_test_results:
+          path: test-results
+      - store_artifacts:
+          path: test-results
+          destination: test-results
+      - store_artifacts:
+          path: playwright-report
+          destination: playwright-report
+
+# Define workflows
 workflows:
-  sample:
+  version: 2
+  
+  # Main workflow for all commits
+  test-and-validate:
     jobs:
-      - test-bdd
+      # Install dependencies first
+      - install-dependencies
+      
+      # Install browsers and run linting in parallel
+      - install-browsers:
+          requires:
+            - install-dependencies
+      
+      - lint:
+          requires:
+            - install-dependencies
+      
+      # Run tests after setup is complete
+      - test-bdd:
+          requires:
+            - install-browsers
+            - lint
+      
+      - test-playwright:
+          requires:
+            - install-browsers
+            - lint
+  
+  # Nightly workflow to catch dependency issues
+  nightly-test:
+    triggers:
+      - schedule:
+          cron: "0 2 * * *"  # 2 AM UTC daily
+          filters:
+            branches:
+              only:
+                - main
+                - master
+                - develop
+    jobs:
+      - install-dependencies
+      - install-browsers:
+          requires:
+            - install-dependencies
+      - test-bdd:
+          requires:
+            - install-browsers
