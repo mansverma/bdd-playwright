@@ -7,7 +7,7 @@ jobs:
   test-bdd:
     executor:
       name: node/default
-      tag: '18.17'   # ✅ Node.js 18 (LTS, Playwright supported)
+      tag: '20.10'   # ✅ Node.js 20 (supported by Playwright + Cucumber)
     steps:
       - checkout
 
